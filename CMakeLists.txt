@@ -33,7 +33,7 @@ project(NRF24 C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
-add_executable(NRF24 main.c)
+add_executable(NRF24 main.c adxl345.c)
 
 add_subdirectory(pico-nrf24-main/lib)
 
@@ -52,6 +52,7 @@ target_link_libraries(NRF24
         pico_stdlib
         hardware_spi
         hardware_gpio
+        hardware_i2c
         nrf24_driver
         )
 
