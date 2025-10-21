@@ -87,6 +87,12 @@ void buffer_process_all(circ_buffer_t *buff, void (*callback)(int16_t value)){
   }
 }
 
+void buffer_clear(circ_buffer_t *buff){
+  buff->head = 0;
+  buff->count = 0;
+  for(int i = 0; i < BUFF_SIZE; i++) { buff->data[i] = 0; }
+}
+
 bool synch = false;
 bool start_adxl = false;
 bool start_GUN = false;
@@ -291,6 +297,7 @@ int main(void)
             printf("%d %d\n", i - BUFF_SIZE, raw_data[i - BUFF_SIZE]);
           }
         }
+        buffer_clear(&circ_buffer);
       }
     }
 
