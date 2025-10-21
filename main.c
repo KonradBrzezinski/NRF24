@@ -22,6 +22,18 @@
 #include "nrf24_driver.h"
 #include "pico/stdlib.h"
 
+uint64_t synch_time_1 = 0;
+uint64_t synch_time_2 = 0;
+
+bool synch = false;
+
+void gps_callback(uint gpio, uint32_t events){
+  if(gpio == 15){
+    synch_time_2 = synch_time_1;
+    synch_time_1 = to_us_since_boot(get_absolute_time());
+    printf("Synch via GPS: %lldus\n", synch_time_1 - synch_time_2);
+  }
+}
 
 int main(void)
 {
@@ -110,47 +122,50 @@ int main(void)
   // holds payload_two struct sent by the transmitter
   payload_two_t payload_two;
 
+  // uint64_t start_time = to_us_since_boot(get_absolute_time());
+
+
+
+  gpio_init(15);
+  gpio_set_dir(15, GPIO_IN);
+
+  gpio_set_irq_enabled_with_callback(15, GPIO_IRQ_EDGE_RISE, true, &gps_callback);
+
   while (1)
   {
     if (my_nrf.is_packet(&pipe_number))
     {
-      switch (pipe_number)
-      {
-        case DATA_PIPE_0:
-          // read payload
-          my_nrf.read_packet(&payload_zero, sizeof(payload_zero));
+      // switch (pipe_number)
+      // {
+      //   case DATA_PIPE_0:
+      //     // read payload
+      //     my_nrf.read_packet(&payload_zero, sizeof(payload_zero));
+
+      //     // receiving a one byte uint8_t payload on DATA_PIPE_0
+      //     // printf("\nPacket received:- Payload (%d) on data pipe (%d)\n", payload_zero, pipe_number);
+      //     if(payload_zero & 0x80){
+      //       synch_time_1 = to_us_since_boot(get_absolute_time());
+      //       printf("Synch time 1: %lld\n", synch_time_1);
+      //     }
+      //     if(payload_zero & 0x01){
+      //       synch_time_2 = to_us_since_boot(get_absolute_time());
+      //       printf("Synch time 1: %lld\n", synch_time_2);
+      //       printf("Synchronized time: %llu\n", synch_time_2 - synch_time_1);
+      //     }
+      //   break;
+      // }
+      my_nrf.read_packet(&payload_zero, sizeof(payload_zero));
 
           // receiving a one byte uint8_t payload on DATA_PIPE_0
-          printf("\nPacket received:- Payload (%d) on data pipe (%d)\n", payload_zero, pipe_number);
-        break;
-        
-        case DATA_PIPE_1:
-          // read payload
-          my_nrf.read_packet(payload_one, sizeof(payload_one));
-
-          // receiving a five byte string payload on DATA_PIPE_1
-          printf("\nPacket received:- Payload (%s) on data pipe (%d)\n", payload_one, pipe_number);
-        break;
-        
-        case DATA_PIPE_2:
-          // read payload
-          my_nrf.read_packet(&payload_two, sizeof(payload_two));
-
-          // receiving a two byte struct payload on DATA_PIPE_2
-          printf("\nPacket received:- Payload (1: %d, 2: %d) on data pipe (%d)\n", payload_two.one, payload_two.two, pipe_number);
-        break;
-        
-        case DATA_PIPE_3:
-        break;
-        
-        case DATA_PIPE_4:
-        break;
-        
-        case DATA_PIPE_5:
-        break;
-        
-        default:
-        break;
+          // printf("\nPacket received:- Payload (%d) on data pipe (%d)\n", payload_zero, pipe_number);
+      if(payload_zero & 0x80){
+        synch_time_1 = to_us_since_boot(get_absolute_time());
+        printf("Synch time 1: %lld\n", synch_time_1);
+      }
+      if(payload_zero & 0x01){
+        synch_time_2 = to_us_since_boot(get_absolute_time());
+        printf("Synch time 1: %lld\n", synch_time_2);
+        printf("Synchronized time: %llu\n", synch_time_2 - synch_time_1);
       }
     }
   }
