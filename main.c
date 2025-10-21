@@ -10,11 +10,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the 
  * GNU General Public License for more details.
  * 
- * @file primary_receiver.c
+ * @file primary_transmitter.c
  * 
- * @brief example of NRF24L01 setup as a primary receiver using the 
- * NRF24L01 driver. Different payload widths are set for the data pipes,
- * in order to receive different data structures from the transmitter.
+ * @brief example of NRF24L01 setup as a primary transmitter using the 
+ * NRF24L01 driver. Different data types and sizes are sent to different 
+ * receiver data pipes as an example, utilizing dynamic payload size.
  */
 
 #include <stdio.h>
@@ -22,12 +22,64 @@
 #include "nrf24_driver.h"
 #include "pico/stdlib.h"
 
+#define START_ADXL 0xF0
+#define START_GUN 0x0F
+#define TIME_SYNCH 0b01010101
+
+bool send = false;
+bool time_synch_2_check = false;
+bool time_synch_1_check = false;
+
+// payload sent to receiver data pipe 0
+uint8_t payload_zero = 0b00000001;
+
+volatile uint64_t synch_time_1 = 0;
+volatile uint64_t synch_time_2 = 0;
+
+void gpio_callback(uint gpio, uint32_t events) {
+    if(gpio == 16) {
+        // synch_time_1 = to_us_since_boot(get_absolute_time());
+        payload_zero = START_ADXL;
+        send = true;        
+        // time_synch_1_check = true;
+        printf("STARTED ADXL\n");
+        // printf("FALLING EDGE on GPIO 16\n");
+    }
+    if(gpio == 17) {
+        // synch_time_2 = to_us_since_boot(get_absolute_time());
+        payload_zero = TIME_SYNCH;
+        send = true;
+        time_synch_2_check = true;
+        // printf("Synch time 2: %lld us\n", synch_time_2);
+        // printf("Time difference: %llu us\n", synch_time_2 - synch_time_1);
+        // printf("FALLING EDGE on GPIO 17\n");
+    }
+    if(gpio == 18){
+      payload_zero = START_GUN;
+      send = true;
+      printf("STARTED GUN\n");
+    }
+    if(gpio == 15 && (events & GPIO_IRQ_EDGE_RISE)) {
+        synch_time_2 = synch_time_1;
+        synch_time_1 = to_us_since_boot(get_absolute_time());
+        printf("Synch via GPS: %lldus\n", synch_time_1 - synch_time_2);
+    }
+}
+
+// void gpio_callback(uint gpio, uint32_t events) {
+//     if(gpio == 17) {
+//         payload_zero = 0x01;
+//         synch_time_2 = to_us_since_boot(get_absolute_time());
+//         send = true;
+//         printf("Synch time 1: %lld us\n", synch_time_2);
+//         printf("Time difference: %llu us\n", synch_time_2 - synch_time_1);
+//     }
+// }
 
 int main(void)
 {
   // initialize all present standard stdio types
   stdio_init_all();
-
 
 
   // GPIO pin numbers
@@ -71,7 +123,6 @@ int main(void)
   // SPI baudrate
   uint32_t my_baudrate = 5000000;
 
-  // provides access to driver functions
   nrf_client_t my_nrf;
 
   // initialise my_nrf
@@ -83,76 +134,79 @@ int main(void)
   // not using default configuration (my_nrf.initialise(NULL)) 
   my_nrf.initialise(&my_config);
 
-  /**
-   * set addresses for DATA_PIPE_0 - DATA_PIPE_3.
-   * These are addresses the transmitter will send its packets to.
-   */
-  my_nrf.rx_destination(DATA_PIPE_0, (uint8_t[]){0x37,0x37,0x37,0x37,0x37});
-  my_nrf.rx_destination(DATA_PIPE_1, (uint8_t[]){0xC7,0xC7,0xC7,0xC7,0xC7});
-  my_nrf.rx_destination(DATA_PIPE_2, (uint8_t[]){0xC8,0xC7,0xC7,0xC7,0xC7});
-  my_nrf.rx_destination(DATA_PIPE_3, (uint8_t[]){0xC9,0xC7,0xC7,0xC7,0xC7});
+  // set to Standby-I Mode
+  my_nrf.standby_mode();
 
-  // set to RX Mode
-  my_nrf.receiver_mode();
+  // result of packet transmission
+  fn_status_t success = 0;
 
-  // data pipe number a packet was received on
-  uint8_t pipe_number = 0;
+  uint64_t time_sent = 0; // time packet was sent
+  uint64_t time_reply = 0; // response time after packet sent
 
-  // holds payload_zero sent by the transmitter
-  uint8_t payload_zero = 0;
+  gpio_init(16);
+  gpio_set_dir(16, GPIO_IN);
+  gpio_pull_up(16);
 
-  // holds payload_one sent by the transmitter
-  uint8_t payload_one[5];
+  gpio_init(17);
+  gpio_set_dir(17, GPIO_IN);
+  gpio_pull_up(17);
 
-  // two byte struct sent by transmitter
-  typedef struct payload_two_s { uint8_t one; uint8_t two; } payload_two_t;
+  gpio_init(18);
+  gpio_set_dir(18, GPIO_IN);
+  gpio_pull_up(18);
 
-  // holds payload_two struct sent by the transmitter
-  payload_two_t payload_two;
 
-  while (1)
-  {
-    if (my_nrf.is_packet(&pipe_number))
-    {
-      switch (pipe_number)
-      {
-        case DATA_PIPE_0:
-          // read payload
-          my_nrf.read_packet(&payload_zero, sizeof(payload_zero));
+  gpio_init(15);
+  gpio_set_dir(15, GPIO_IN);
 
-          // receiving a one byte uint8_t payload on DATA_PIPE_0
-          printf("\nPacket received:- Payload (%d) on data pipe (%d)\n", payload_zero, pipe_number);
-        break;
-        
-        case DATA_PIPE_1:
-          // read payload
-          my_nrf.read_packet(payload_one, sizeof(payload_one));
+  gpio_set_irq_enabled_with_callback(16, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+  gpio_set_irq_enabled_with_callback(17, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+  gpio_set_irq_enabled_with_callback(18, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+  gpio_set_irq_enabled_with_callback(15, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
 
-          // receiving a five byte string payload on DATA_PIPE_1
-          printf("\nPacket received:- Payload (%s) on data pipe (%d)\n", payload_one, pipe_number);
-        break;
-        
-        case DATA_PIPE_2:
-          // read payload
-          my_nrf.read_packet(&payload_two, sizeof(payload_two));
+  while (1) {
 
-          // receiving a two byte struct payload on DATA_PIPE_2
-          printf("\nPacket received:- Payload (1: %d, 2: %d) on data pipe (%d)\n", payload_two.one, payload_two.two, pipe_number);
-        break;
-        
-        case DATA_PIPE_3:
-        break;
-        
-        case DATA_PIPE_4:
-        break;
-        
-        case DATA_PIPE_5:
-        break;
-        
-        default:
-        break;
+    // send to receiver's DATA_PIPE_0 address
+    if(send){
+      send = false;
+      my_nrf.tx_destination((uint8_t[]){0x37,0x37,0x37,0x37,0x37});
+
+      // time packet was sent
+      // time_sent = to_us_since_boot(get_absolute_time()); // time sent
+
+      // send packet to receiver's DATA_PIPE_0 address
+      success = my_nrf.send_packet(&payload_zero, sizeof(payload_zero));
+      
+      if(time_synch_1_check){ 
+        time_synch_1_check = false;
+        synch_time_1 = to_us_since_boot(get_absolute_time());
       }
+      
+      if(time_synch_2_check){ 
+        time_synch_2_check = false;
+        synch_time_2 = to_us_since_boot(get_absolute_time());
+        printf("Synch time 1: %lld us\n", synch_time_1);
+        printf("Synch time 2: %lld us\n", synch_time_2);
+        printf("Time difference: %llu us\n", synch_time_2 - synch_time_1);
+      }
+
+      // time auto-acknowledge was received
+      // time_reply = to_us_since_boot(get_absolute_time()); // response time
+
+
+
+      // if (success)
+      // {
+      //   printf("\nPacket sent:- Response: %lluμS | Payload: %d\n", time_reply - time_sent, payload_zero);
+
+      // } else {
+
+      //   printf("\nPacket not sent:- Receiver not available.\n");
+      // }
     }
+
+    __asm volatile ("dmb");
+
+    tight_loop_contents();
   }
-  
 }

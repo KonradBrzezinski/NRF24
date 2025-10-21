@@ -52,6 +52,7 @@ target_link_libraries(NRF24
         pico_stdlib
         hardware_spi
         hardware_gpio
+        hardware_irq
         nrf24_driver
         )
 
