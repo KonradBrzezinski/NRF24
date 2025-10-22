@@ -41,7 +41,7 @@ pico_set_program_name(NRF24 "NRF24")
 pico_set_program_version(NRF24 "0.1")
 
 # no_flash means the target is to run from RAM
-pico_set_binary_type(NRF24 no_flash)
+# pico_set_binary_type(NRF24 no_flash)
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(NRF24 1)

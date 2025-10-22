@@ -22,26 +22,44 @@
 #include "nrf24_driver.h"
 #include "pico/stdlib.h"
 #include "adxl345.h"
-
-uint64_t synch_time_1 = 0;
-uint64_t synch_time_2 = 0;
+#include "pico/time.h"
+#include <stdlib.h>
 
 #define START_ADXL 0xF0
 #define START_GUN 0x0F
 #define TIME_SYNCH 0b01010101
 
+#define ALPHA 0.7
+
 #define GPS_PIN 15
 #define BUZZER_PIN 14
 
 #define BUFF_SIZE 500
-#define DATA_SIZE 500
-extern uint16_t buffer[BUFF_SIZE];
+#define DATA_SIZE 500 + 1
 
 typedef struct{
   int16_t data[BUFF_SIZE];
   uint16_t head;
   uint16_t count;
 }circ_buffer_t;
+
+uint64_t synch_time_1 =     0;
+uint64_t synch_time_2 =     0;
+uint64_t time_start   =     0;
+uint64_t time_end     =     0;
+bool synch            = false;
+bool start_adxl       = false;
+bool start_GUN        = false;
+bool started          = false;
+
+int16_t raw_data[DATA_SIZE];
+uint16_t counter = 0;
+
+circ_buffer_t circ_buffer;
+struct repeating_timer timer;
+
+extern uint16_t buffer[BUFF_SIZE];
+// int16_t reaction = 0;
 
 void buffer_init(circ_buffer_t *buff){
   buff->head = 0;
@@ -93,10 +111,6 @@ void buffer_clear(circ_buffer_t *buff){
   for(int i = 0; i < BUFF_SIZE; i++) { buff->data[i] = 0; }
 }
 
-bool synch = false;
-bool start_adxl = false;
-bool start_GUN = false;
-
 void gps_callback(uint gpio, uint32_t events){
   if(gpio == GPS_PIN){
     synch_time_2 = synch_time_1;
@@ -105,27 +119,100 @@ void gps_callback(uint gpio, uint32_t events){
   }
 }
 
-bool check_if_falsestart(int16_t *raw_data){
+int16_t low_pass_filter(int16_t input, int16_t *previous_output){
+  int16_t output = ALPHA * input + (1.0 - ALPHA) * (*previous_output);
+  *previous_output = output;
+  return output;
+}
+
+int16_t *filter_data(int16_t *data, size_t size){
+  if(size == 0) return data;
+
+  int16_t filter_state = data[0];
+  for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+    data[i] = low_pass_filter(data[i], &filter_state);
+  }
+
+  return data;
+}
+
+int16_t check_reaction(int16_t data[]){
   // FILTERING, DECISION, SIGNAL
 
-  int16_t filtered_data[DATA_SIZE];
+  // int16_t filtered_data[DATA_SIZE];
 
-  filtered_data[0] = 0;
+  // filtered_data[0] = 0;
 
-  for(int i = 1; i < DATA_SIZE+BUFF_SIZE; i++){
-    filtered_data[i] = 0.1f * raw_data[i] + (1.0f - 0.1f)*filtered_data[i-1];
-    printf("%d %d\n", i, filtered_data[i]);
+  // for(int i = 1; i < DATA_SIZE+BUFF_SIZE; i++){
+  //   filtered_data[i] = 0.1f * raw_data[i] + (1.0f - 0.1f)*filtered_data[i-1];
+  //   printf("%d %d\n", i, filtered_data[i]);
+  // }
+
+  int16_t reaction = 0;
+
+  for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+    if(abs(data[i]) > 30){
+      reaction = i - BUFF_SIZE;
+      return reaction;
+    }
+  }
+
+  return reaction;
+}
+
+bool timer_callback(struct repeating_timer *t){
+
+  if(start_adxl && !start_GUN){
+    buffer_put(&circ_buffer, ADXL345_read_X_g());
+  }
+
+  if(start_adxl && start_GUN){
+    // if(started){
+    //   started = false;
+    //   // time_start = to_us_since_boot(get_absolute_time());
+    // }
+    raw_data[counter++] = ADXL345_read_X_g();
+    if(counter == DATA_SIZE){
+      // time_end = to_us_since_boot(get_absolute_time());
+      cancel_repeating_timer(&timer);
+      start_adxl = false;
+      start_GUN = false;
+      
+      int16_t raw_data_together[BUFF_SIZE + DATA_SIZE];
+      // printf("Czas pomiaru: %lld\n", time_end - time_start);
+
+      for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+        if(i < BUFF_SIZE){
+          raw_data_together[i] = circ_buffer.data[i];
+        }else{
+          raw_data_together[i] = raw_data[i - BUFF_SIZE];
+        }
+      }
+
+      int16_t reaction = check_reaction(raw_data_together);
+
+      buffer_clear(&circ_buffer);
+      counter = 0;
+
+      for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+        printf("%d %d\n", i - BUFF_SIZE, raw_data_together[i]);
+      }
+      printf("REACTION: %d\n", reaction);
+    }
   }
 
   return true;
+}
+
+int64_t turn_off_buzzer_callback(alarm_id_t id, void *user_data){
+  gpio_put(BUZZER_PIN, 0);
+  return 0;
 }
 
 int main(void)
 {
   // initialize all present standard stdio types
   stdio_init_all();
-
-  circ_buffer_t circ_buffer;
 
   buffer_init(&circ_buffer);
 
@@ -213,15 +300,13 @@ int main(void)
 
   // uint64_t start_time = to_us_since_boot(get_absolute_time());
 
-  int16_t raw_data[DATA_SIZE];
-  uint16_t counter = 0;
   gpio_init(GPS_PIN);
   gpio_set_dir(GPS_PIN, GPIO_IN);
 
-  gpio_set_irq_enabled_with_callback(GPS_PIN, GPIO_IRQ_EDGE_RISE, true, &gps_callback);
+  gpio_init(BUZZER_PIN);
+  gpio_set_dir(BUZZER_PIN, GPIO_OUT);
 
-  start_adxl = false;
-  start_GUN = false;
+  gpio_set_irq_enabled_with_callback(GPS_PIN, GPIO_IRQ_EDGE_RISE, true, &gps_callback);
 
   while (1)
   {
@@ -262,63 +347,60 @@ int main(void)
 
       if(payload_zero == START_ADXL){
         start_adxl = true;
-        // printf("ADXL STARTED\n");
+        // gpio_put(BUZZER_PIN, 1);
+        buffer_clear(&circ_buffer);
+        add_repeating_timer_ms(-1, timer_callback, NULL, &timer);
       }
       if(payload_zero == START_GUN){
         start_GUN = true;
-        // printf("GUN SHOT\n");
+        started = true;
+        gpio_put(BUZZER_PIN, 1);
+        add_alarm_in_ms(200, turn_off_buzzer_callback, NULL, false);
       }
     }
-    // if(start_adxl){
-    //   if(start_GUN && counter < DATA_SIZE){
-    //     raw_data[counter++] = ADXL345_read_X_g();
-    //   }else if(counter == DATA_SIZE){
-    //     for(int i = 0; i < DATA_SIZE; i++){
-    //       printf("%d %d\n", i, raw_data[i]);
-    //     }
+
+    // if(start_adxl && !start_GUN){
+    //   if(if_data_diff(&last_val, x_val.x)){
+    //     buffer_put(&circ_buffer, x_val.x);
     //   }
     // }
 
-    if(start_adxl && !start_GUN){
-      int16_t x = ADXL345_read_X_g();
-      buffer_put(&circ_buffer, x);
-    }
-    if(start_adxl && start_GUN){
-      raw_data[counter++] = ADXL345_read_X_g();
-      if(counter == DATA_SIZE){
-        start_adxl = false;
-        start_GUN = false;
-        counter = 0;
+    // if(start_adxl && start_GUN){
+    //   // if(started){
+    //   //   started = false;
+        
+    //   // }
+    //   time_start = to_us_since_boot(get_absolute_time());
+    //   if(if_data_diff(&last_val, x_val.x) && counter < DATA_SIZE){
+    //     raw_data[counter] = x_val.x;
+    //     counter++;
+    //   }
+    //   time_end = to_us_since_boot(get_absolute_time());
+    //   printf("Czas pomiaru od wystrzału: %lld\n", time_end - time_start);
+    //   if(counter == DATA_SIZE){
+        
+    //     cancel_repeating_timer(&timer);
+    //     start_adxl = false;
+    //     start_GUN = false;
+    //     counter = 0;
 
-        for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
-          if(i < BUFF_SIZE){
-            printf("%d %d\n", i - BUFF_SIZE, circ_buffer.data[i]);
-          }else{
-            printf("%d %d\n", i - BUFF_SIZE, raw_data[i - BUFF_SIZE]);
-          }
-        }
-        buffer_clear(&circ_buffer);
-      }
-    }
+        
 
-    // if(start_adxl){
-    //   if(!start_GUN){
-    //     int16_t x_value = ADXL345_read_X_g();
-    //     buffer_put(&circ_buffer, x_value);
-    //   }else{
-    //     // int16_t x_value = ADXL345_read_X_g();
-    //     if(counter < DATA_SIZE)
-    //       raw_data[counter++] = ADXL345_read_X_g();
-    //     else{
-    //       int16_t raw_data_together[BUFF_SIZE + DATA_SIZE];
-    //       for(int i = 0; i < BUFF_SIZE+DATA_SIZE; i++){
-    //         if(i < BUFF_SIZE)
-    //           raw_data_together[i] = circ_buffer.data[i];
-    //         else
-    //           raw_data_together[i] = circ_buffer.data[i-BUFF_SIZE];
-    //       }
-    //       check_if_falsestart(raw_data_together);
-    //     }
+    //     // int16_t raw_data_together[BUFF_SIZE + DATA_SIZE];
+
+    //     // for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+    //     //   if(i < BUFF_SIZE){
+    //     //     raw_data_together[i] = circ_buffer.data[i];
+    //     //   }else{
+    //     //     raw_data_together[i] = raw_data[i - BUFF_SIZE];
+    //     //   }
+    //     // }
+
+    //     // for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+    //     //   // printf("%d %d\n", i - BUFF_SIZE, raw_data_together[i]);
+    //     // }
+    //     // printf("Całkowity czas wykonania: %lld\n", time_end - time_start);
+    //     buffer_clear(&circ_buffer);
     //   }
     // }
   }
