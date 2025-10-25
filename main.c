@@ -21,12 +21,16 @@
 
 #include "nrf24_driver.h"
 #include "pico/stdlib.h"
+#include "hardware/gpio.h"
 
 #define START_ADXL 0xF0
 #define START_GUN 0x0F
 #define TIME_SYNCH 0b01010101
+#define DATA_SIZE 500
+#define BUFF_SIZE 500
 
 bool send = false;
+bool receive = false;
 bool time_synch_2_check = false;
 bool time_synch_1_check = false;
 
@@ -42,7 +46,7 @@ void gpio_callback(uint gpio, uint32_t events) {
         payload_zero = START_ADXL;
         send = true;        
         // time_synch_1_check = true;
-        printf("STARTED ADXL\n");
+        // printf("STARTED ADXL\n");
         // printf("FALLING EDGE on GPIO 16\n");
     }
     if(gpio == 17) {
@@ -57,7 +61,7 @@ void gpio_callback(uint gpio, uint32_t events) {
     if(gpio == 18){
       payload_zero = START_GUN;
       send = true;
-      printf("STARTED GUN\n");
+      // printf("STARTED GUN\n");
     }
     if(gpio == 15 && (events & GPIO_IRQ_EDGE_RISE)) {
         synch_time_2 = synch_time_1;
@@ -154,8 +158,6 @@ int main(void)
   gpio_init(18);
   gpio_set_dir(18, GPIO_IN);
   gpio_pull_up(18);
-
-
   gpio_init(15);
   gpio_set_dir(15, GPIO_IN);
 
@@ -164,19 +166,28 @@ int main(void)
   gpio_set_irq_enabled_with_callback(18, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
   gpio_set_irq_enabled_with_callback(15, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
 
-  while (1) {
+  my_nrf.rx_destination(DATA_PIPE_1, (uint8_t[]){0xC7,0xC7,0xC7,0xC7,0xC7});
+  char msg[32];
+  uint16_t counter = 0;
 
+  while (1) {
     // send to receiver's DATA_PIPE_0 address
     if(send){
       send = false;
       my_nrf.tx_destination((uint8_t[]){0x37,0x37,0x37,0x37,0x37});
-
-      // time packet was sent
-      // time_sent = to_us_since_boot(get_absolute_time()); // time sent
-
-      // send packet to receiver's DATA_PIPE_0 address
       success = my_nrf.send_packet(&payload_zero, sizeof(payload_zero));
-      
+    
+      if(success){
+        printf("SENT PAYLOAD\n");
+      }
+
+      if(payload_zero == START_GUN){
+        my_nrf.receiver_mode();
+        // sleep_ms(1);
+        receive = true;
+        payload_zero = 0;
+      }
+
       if(time_synch_1_check){ 
         time_synch_1_check = false;
         synch_time_1 = to_us_since_boot(get_absolute_time());
@@ -189,24 +200,34 @@ int main(void)
         printf("Synch time 2: %lld us\n", synch_time_2);
         printf("Time difference: %llu us\n", synch_time_2 - synch_time_1);
       }
-
-      // time auto-acknowledge was received
-      // time_reply = to_us_since_boot(get_absolute_time()); // response time
-
-
-
-      // if (success)
-      // {
-      //   printf("\nPacket sent:- Response: %lluμS | Payload: %d\n", time_reply - time_sent, payload_zero);
-
-      // } else {
-
-      //   printf("\nPacket not sent:- Receiver not available.\n");
-      // }
     }
+
+    if(receive){
+      if(my_nrf.is_packet(NULL)){
+        my_nrf.read_packet(msg, sizeof(msg));
+        printf("%s", msg);
+        if(msg[0] == 'r'){
+          receive = false;
+          my_nrf.standby_mode();
+        }
+      }
+    }
+
+    // if(success && (payload_zero == START_GUN)){
+    //   uint8_t pipe_number = 0;
+    //   my_nrf.receiver_mode();
+    //   char msg[32];
+    //   if(my_nrf.is_packet(&pipe_number)){
+    //     if(pipe_number == DATA_PIPE_1){
+    //       my_nrf.read_packet(msg, sizeof(msg));
+    //       printf("%s", msg);
+    //     }
+    //   }
+    // }
 
     __asm volatile ("dmb");
 
     tight_loop_contents();
   }
+  return 0;
 }
