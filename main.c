@@ -48,11 +48,14 @@ uint64_t synch_time_1 =     0;
 uint64_t synch_time_2 =     0;
 uint64_t time_start   =     0;
 uint64_t time_end     =     0;
+int16_t  reaction     =     0;
 bool synch            = false;
 bool start_adxl       = false;
 bool start_GUN        = false;
 bool started          = false;
 bool set_receiver     = false;
+bool receive          =  true;
+bool send_data        = false;
 
 // GPIO pin numbers
 pin_manager_t my_pins = { 
@@ -88,6 +91,7 @@ nrf_manager_t my_config = {
 uint32_t my_baudrate = 5000000;
 
 int16_t raw_data[DATA_SIZE];
+int16_t raw_data_together[DATA_SIZE + BUFF_SIZE];
 // int16_t *raw_data = NULL;
 uint16_t counter = 0;
 
@@ -208,20 +212,14 @@ bool timer_callback(struct repeating_timer *t){
   }
 
   if(start_adxl && start_GUN){
-    // if(started){
-    //   started = false;
-    //   // time_start = to_us_since_boot(get_absolute_time());
-    // }
     raw_data[counter++] = ADXL345_read_X_g();
     if(counter == DATA_SIZE){
-      // time_end = to_us_since_boot(get_absolute_time());
+      counter = 0;
       cancel_repeating_timer(&timer);
       start_adxl = false;
       start_GUN = false;
+      send_data = true;
       
-      int16_t raw_data_together[BUFF_SIZE + DATA_SIZE];
-      // printf("Czas pomiaru: %lld\n", time_end - time_start);
-
       for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
         if(i < BUFF_SIZE){
           raw_data_together[i] = circ_buffer.data[i];
@@ -229,38 +227,10 @@ bool timer_callback(struct repeating_timer *t){
           raw_data_together[i] = raw_data[i - BUFF_SIZE];
         }
       }
-
-      int16_t reaction = check_reaction(raw_data_together);
-
-      buffer_clear(&circ_buffer);
-      counter = 0;
-
-      my_nrf.standby_mode();
-      my_nrf.tx_destination((uint8_t[]){0xC7,0xC7,0xC7,0xC7,0xC7});
-
-      char msg[32];
-
-      for(uint16_t i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
-        sprintf(msg, "%d %d\n", (i - BUFF_SIZE), raw_data_together[i]);
-        my_nrf.send_packet(&msg, sizeof(msg));
-        // printf("Wysłano %d\n", i);
-      }
-
-      sprintf(msg, "r%d\n", reaction);
-      my_nrf.send_packet(&msg, sizeof(msg));
-
-      // set_receiver = true;
-      
-      // if(my_nrf.receiver_mode()){
-      //   printf("Zmieniono na RX\n");
-      // }
-
-      // my_nrf.rx_destination(DATA_PIPE_0, (uint8_t[]){0x37,0x37,0x37,0x37,0x37});
-      
-      // my_nrf.rx_destination(DATA_PIPE_0, (uint8_t[]){0x37,0x37,0x37,0x37,0x37});
-      // printf("REACTION: %d\n", reaction);
-      // memset(raw_data, 0, DATA_SIZE * sizeof(int16_t));
-      // memset(raw_data_together, 0, (BUFF_SIZE + DATA_SIZE) * sizeof(int16_t));
+      reaction = check_reaction(raw_data_together);
+      printf("Reaction %d\n", reaction);
+      // raw_data_together[BUFF_SIZE + DATA_SIZE] = reaction;
+      // reaction = check_reaction(raw_data_together);
     }
   }
 
@@ -274,38 +244,22 @@ int64_t turn_off_buzzer_callback(alarm_id_t id, void *user_data){
 
 int main(void)
 {
-  // initialize all present standard stdio types
   stdio_init_all();
 
   buffer_init(&circ_buffer);
 
   ADXL345_init();
 
-
-
-  // provides access to driver functions
-  // nrf_client_t my_nrf;
-
-  // initialise my_nrf
   nrf_driver_create_client(&my_nrf);
-
-  // configure GPIO pins and SPI
   my_nrf.configure(&my_pins, my_baudrate);
-
-  // not using default configuration (my_nrf.initialise(NULL)) 
   my_nrf.initialise(&my_config);
-
-  /**
-   * set addresses for DATA_PIPE_0 - DATA_PIPE_3.
-   * These are addresses the transmitter will send its packets to.
-   */
   my_nrf.rx_destination(DATA_PIPE_0, (uint8_t[]){0x37,0x37,0x37,0x37,0x37});
-  
-  // set to RX Mode
   my_nrf.receiver_mode();
 
   uint8_t pipe_number = 0;
   uint8_t payload_zero = 0;
+
+  bool send_reaction = false;
 
   gpio_init(GPS_PIN);
   gpio_set_dir(GPS_PIN, GPIO_IN);
@@ -317,40 +271,50 @@ int main(void)
 
   while (1)
   {
-    if(set_receiver){
-      set_receiver = false;
-      my_nrf.receiver_mode();
-    }
     if (my_nrf.is_packet(NULL))
     {
       printf("JEST PAKET\n");
       if(my_nrf.read_packet(&payload_zero, sizeof(payload_zero))){
         printf("PACKET: %x\n", payload_zero);
       }
-          // receiving a one byte uint8_t payload on DATA_PIPE_0
-          // printf("\nPacket received:- Payload (%d) on data pipe (%d)\n", payload_zero, pipe_number);
-      // if(payload_zero & 0x80){
-      //   synch_time_1 = to_us_since_boot(get_absolute_time());
-      //   printf("Synch time 1: %lld\n", synch_time_1);
-      // }
-      // if(payload_zero == TIME_SYNCH){
-      //   synch_time_2 = to_us_since_boot(get_absolute_time());
-      //   printf("Synch time 1: %lld\n", synch_time_2);
-      //   printf("Synchronized time: %llu\n", synch_time_2 - synch_time_1);
-      // }
 
       if(payload_zero == START_ADXL){
         start_adxl = true;
-        // gpio_put(BUZZER_PIN, 1);
         buffer_clear(&circ_buffer);
         add_repeating_timer_ms(-1, timer_callback, NULL, &timer);
       }
       if(payload_zero == START_GUN){
         start_GUN = true;
-        started = true;
+        
         gpio_put(BUZZER_PIN, 1);
         add_alarm_in_ms(200, turn_off_buzzer_callback, NULL, false);
       }
     }
+
+    if(send_data){
+      send_data = false;
+      my_nrf.standby_mode();
+      my_nrf.tx_destination((uint8_t[]){0xC3,0xC3,0xC3,0xC3,0xC3});
+      char msg[32];
+      int counter = (-1) * BUFF_SIZE;
+      // sprintf(msg, "R%d", reaction);
+      // my_nrf.send_packet(&msg, sizeof(msg));
+      for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+        sprintf(msg, "%d ", (counter++));
+        my_nrf.send_packet(&msg, sizeof(msg));
+        sprintf(msg, "%d\n", raw_data_together[i]);
+        my_nrf.send_packet(&msg, sizeof(msg));
+      }
+
+      sprintf(msg, "R%d", reaction);
+      my_nrf.send_packet(&msg, sizeof(msg));
+      
+      my_nrf.receiver_mode();
+
+      buffer_clear(&circ_buffer);
+    }
+    __asm volatile ("dmb");
+    tight_loop_contents();
   }
+  return 0;
 }
