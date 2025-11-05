@@ -24,6 +24,7 @@
 #include "adxl345.h"
 #include "pico/time.h"
 #include <stdlib.h>
+#include "savgolFilter.h"
 
 #define START_ADXL 0xF0
 #define START_GUN 0x0F
@@ -39,7 +40,6 @@
 
 typedef struct{
   int16_t data[BUFF_SIZE];
-  // int16_t *data;
   uint16_t head;
   uint16_t count;
 }circ_buffer_t;
@@ -48,7 +48,7 @@ uint64_t synch_time_1 =     0;
 uint64_t synch_time_2 =     0;
 uint64_t time_start   =     0;
 uint64_t time_end     =     0;
-int16_t  reaction     =     0;
+int16_t  reaction     =   999;
 bool synch            = false;
 bool start_adxl       = false;
 bool start_GUN        = false;
@@ -92,21 +92,17 @@ uint32_t my_baudrate = 5000000;
 
 int16_t raw_data[DATA_SIZE];
 int16_t raw_data_together[DATA_SIZE + BUFF_SIZE];
-// int16_t *raw_data = NULL;
+MqsRawDataPoint_t rawDataSavgol[BUFF_SIZE + DATA_SIZE];
+MqsRawDataPoint_t filteredData[BUFF_SIZE + DATA_SIZE];
 uint16_t counter = 0;
 
-// int16_t *raw_data_together = NULL;
-
-circ_buffer_t circ_buffer;
 struct repeating_timer timer;
 nrf_client_t my_nrf;
 
+circ_buffer_t circ_buffer;
 uint16_t *buffer = NULL;
-// uint16_t buffer[BUFF_SIZE];
-// int16_t reaction = 0;
 
 void buffer_init(circ_buffer_t *buff){
-  // buff->data = (int16_t*)malloc(BUFF_SIZE * sizeof(int16_t));
   buff->head = 0;
   buff->count = 0;
   for(int i = 0; i < BUFF_SIZE; i++) { buff->data[i] = 0; }
@@ -121,39 +117,15 @@ void buffer_put(circ_buffer_t *buff, int16_t value){
   }
 }
 
-bool buff_get_last(circ_buffer_t *buff, int16_t *value){
-  if(buff->count == 0){
-    return false;
-  }
-
-  uint16_t index = (buff->head == 0) ? (BUFF_SIZE - 1) : (buff->head - 1);
-  *value = buff->data[index];
-  return true;
-}
-
-void buffer_process_all(circ_buffer_t *buff, void (*callback)(int16_t value)){
-  if(buff->count == 0){
-    return;
-  }
-
-  uint16_t start_index;
-
-  if(buff->count < BUFF_SIZE){
-    start_index = 0;
-  }else{
-    start_index = buff->head;
-  }
-
-  for(uint16_t i = 0; i < buff->count; i++){
-    uint16_t current_index = (start_index + i) % BUFF_SIZE;
-    callback(buff->data[current_index]);
-  }
-}
-
 void buffer_clear(circ_buffer_t *buff){
   buff->head = 0;
   buff->count = 0;
   for(int i = 0; i < BUFF_SIZE; i++) { buff->data[i] = 0; }
+}
+
+int64_t turn_off_buzzer_callback(alarm_id_t id, void *user_data){
+  gpio_put(BUZZER_PIN, 0);
+  return 0;
 }
 
 void gps_callback(uint gpio, uint32_t events){
@@ -164,45 +136,38 @@ void gps_callback(uint gpio, uint32_t events){
   }
 }
 
-int16_t low_pass_filter(int16_t input, int16_t *previous_output){
-  int16_t output = ALPHA * input + (1.0 - ALPHA) * (*previous_output);
-  *previous_output = output;
-  return output;
+void falseStart(){
+  gpio_put(BUZZER_PIN, 1);
+  add_alarm_in_ms(1000, turn_off_buzzer_callback, NULL, false);
 }
 
-int16_t *filter_data(int16_t *data, size_t size){
-  if(size == 0) return data;
-
-  int16_t filter_state = data[0];
-  for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
-    data[i] = low_pass_filter(data[i], &filter_state);
-  }
-
-  return data;
-}
-
-int16_t check_reaction(int16_t data[]){
-  // FILTERING, DECISION, SIGNAL
-
-  // int16_t filtered_data[DATA_SIZE];
-
-  // filtered_data[0] = 0;
-
-  // for(int i = 1; i < DATA_SIZE+BUFF_SIZE; i++){
-  //   filtered_data[i] = 0.1f * raw_data[i] + (1.0f - 0.1f)*filtered_data[i-1];
-  //   printf("%d %d\n", i, filtered_data[i]);
-  // }
-
+int16_t check_reaction(MqsRawDataPoint_t *data){
   int16_t reaction = 0;
+  uint8_t N = 4;
+  int16_t slope;
 
-  for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
-    if(abs(data[i]) > 30){
-      reaction = i - BUFF_SIZE;
-      return reaction;
+  for(int i = N; i < BUFF_SIZE + DATA_SIZE; i++){
+    slope = (int16_t)((data[i].phaseAngle - data[i-N].phaseAngle) / N);
+    if(slope == 3){
+      return i - BUFF_SIZE;
     }
   }
 
   return reaction;
+}
+
+void filter_data(){
+  uint8_t halfWindowSize = 16;
+  uint8_t polynomialOrder = 3;
+  uint8_t targetPoint = 0;
+  uint8_t derivativeOrder = 0;
+
+  for(size_t i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+    rawDataSavgol[i].phaseAngle = raw_data_together[i];
+    filteredData[i].phaseAngle = 0.0f;
+  }
+
+  mes_savgolFilter(rawDataSavgol, DATA_SIZE + BUFF_SIZE, halfWindowSize, filteredData, polynomialOrder, targetPoint, derivativeOrder);
 }
 
 bool timer_callback(struct repeating_timer *t){
@@ -227,19 +192,15 @@ bool timer_callback(struct repeating_timer *t){
           raw_data_together[i] = raw_data[i - BUFF_SIZE];
         }
       }
-      reaction = check_reaction(raw_data_together);
+
+      filter_data();
+
+      reaction = check_reaction(filteredData);
       printf("Reaction %d\n", reaction);
-      // raw_data_together[BUFF_SIZE + DATA_SIZE] = reaction;
-      // reaction = check_reaction(raw_data_together);
     }
   }
 
   return true;
-}
-
-int64_t turn_off_buzzer_callback(alarm_id_t id, void *user_data){
-  gpio_put(BUZZER_PIN, 0);
-  return 0;
 }
 
 int main(void)
@@ -260,6 +221,7 @@ int main(void)
   uint8_t payload_zero = 0;
 
   bool send_reaction = false;
+  bool falseStartFired = false;
 
   gpio_init(GPS_PIN);
   gpio_set_dir(GPS_PIN, GPIO_IN);
@@ -280,6 +242,8 @@ int main(void)
 
       if(payload_zero == START_ADXL){
         start_adxl = true;
+        start_GUN = false;
+        falseStartFired = false;
         buffer_clear(&circ_buffer);
         add_repeating_timer_ms(-1, timer_callback, NULL, &timer);
       }
@@ -289,6 +253,11 @@ int main(void)
         gpio_put(BUZZER_PIN, 1);
         add_alarm_in_ms(200, turn_off_buzzer_callback, NULL, false);
       }
+    }
+    
+    if(reaction < 100 && !falseStartFired){
+      falseStartFired = true;
+      falseStart();
     }
 
     if(send_data){
@@ -302,7 +271,8 @@ int main(void)
       for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
         sprintf(msg, "%d ", (counter++));
         my_nrf.send_packet(&msg, sizeof(msg));
-        sprintf(msg, "%d\n", raw_data_together[i]);
+        // sprintf(msg, "%d\n", raw_data_together[i]);
+        sprintf(msg, "%d\n", (int16_t)filteredData[i].phaseAngle);
         my_nrf.send_packet(&msg, sizeof(msg));
       }
 
