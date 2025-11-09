@@ -18,22 +18,31 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "nrf24_driver.h"
 #include "pico/stdlib.h"
 #include "adxl345.h"
 #include "pico/time.h"
-#include <stdlib.h>
 #include "savgolFilter.h"
+#include "hardware/timer.h"
+#include "hardware/irq.h"
 
 #define START_ADXL 0xF0
 #define START_GUN 0x0F
 #define TIME_SYNCH 0b01010101
 
+#define INTERVAL_US 1000
+#define BUZZER_TIME_ON 200
+
 #define ALPHA 0.7
 
 #define GPS_PIN 15
 #define BUZZER_PIN 14
+
+#define RED_PIN 18
+#define GREEN_PIN 19
+#define BLUE_PIN 20
 
 #define BUFF_SIZE 500
 #define DATA_SIZE 500 + 1
@@ -128,6 +137,13 @@ int64_t turn_off_buzzer_callback(alarm_id_t id, void *user_data){
   return 0;
 }
 
+int64_t turn_off_leds_callback(alarm_id_t id, void *user_data){
+  gpio_put(RED_PIN, 1);
+  gpio_put(BLUE_PIN, 1);
+  gpio_put(GREEN_PIN, 0);
+  return 0;
+}
+
 void gps_callback(uint gpio, uint32_t events){
   if(gpio == GPS_PIN){
     synch_time_2 = synch_time_1;
@@ -147,7 +163,7 @@ int16_t check_reaction(MqsRawDataPoint_t *data){
   int16_t slope;
 
   for(int i = N; i < BUFF_SIZE + DATA_SIZE; i++){
-    slope = (int16_t)((data[i].phaseAngle - data[i-N].phaseAngle) / N);
+    slope = abs((int16_t)((data[i].phaseAngle - data[i-N].phaseAngle) / N));
     if(slope == 3){
       return i - BUFF_SIZE;
     }
@@ -170,12 +186,11 @@ void filter_data(){
   mes_savgolFilter(rawDataSavgol, DATA_SIZE + BUFF_SIZE, halfWindowSize, filteredData, polynomialOrder, targetPoint, derivativeOrder);
 }
 
-bool timer_callback(struct repeating_timer *t){
-
+void measure(){
   if(start_adxl && !start_GUN){
     buffer_put(&circ_buffer, ADXL345_read_X_g());
   }
-
+  // printf("ADXL: %d, GUN: %d\n", start_adxl, start_GUN);
   if(start_adxl && start_GUN){
     raw_data[counter++] = ADXL345_read_X_g();
     if(counter == DATA_SIZE){
@@ -184,7 +199,7 @@ bool timer_callback(struct repeating_timer *t){
       start_adxl = false;
       start_GUN = false;
       send_data = true;
-      
+
       for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
         if(i < BUFF_SIZE){
           raw_data_together[i] = circ_buffer.data[i];
@@ -199,8 +214,53 @@ bool timer_callback(struct repeating_timer *t){
       printf("Reaction %d\n", reaction);
     }
   }
+}
+
+bool timer_callback(struct repeating_timer *t){
+  measure();
+  // if(start_adxl && !start_GUN){
+  //   buffer_put(&circ_buffer, ADXL345_read_X_g());
+  // }
+
+  // if(start_adxl && start_GUN){
+  //   raw_data[counter++] = ADXL345_read_X_g();
+  //   if(counter == DATA_SIZE){
+  //     counter = 0;
+  //     cancel_repeating_timer(&timer);
+  //     start_adxl = false;
+  //     start_GUN = false;
+  //     send_data = true;
+      
+  //     for(int i = 0; i < BUFF_SIZE + DATA_SIZE; i++){
+  //       if(i < BUFF_SIZE){
+  //         raw_data_together[i] = circ_buffer.data[i];
+  //       }else{
+  //         raw_data_together[i] = raw_data[i - BUFF_SIZE];
+  //       }
+  //     }
+
+  //     filter_data();
+
+  //     reaction = check_reaction(filteredData);
+  //     printf("Reaction %d\n", reaction);
+  //   }
+  // }
 
   return true;
+}
+
+void init_led_pins(){
+  gpio_init(RED_PIN);
+  gpio_init(GREEN_PIN);
+  gpio_init(BLUE_PIN);
+
+  gpio_set_dir(RED_PIN, GPIO_OUT);
+  gpio_set_dir(GREEN_PIN, GPIO_OUT);
+  gpio_set_dir(BLUE_PIN, GPIO_OUT);
+
+  gpio_put(RED_PIN, 1);
+  gpio_put(GREEN_PIN, 1);
+  gpio_put(GREEN_PIN, 1);
 }
 
 int main(void)
@@ -229,6 +289,8 @@ int main(void)
   gpio_init(BUZZER_PIN);
   gpio_set_dir(BUZZER_PIN, GPIO_OUT);
 
+  // init_led_pins();
+
   gpio_set_irq_enabled_with_callback(GPS_PIN, GPIO_IRQ_EDGE_RISE, true, &gps_callback);
 
   while (1)
@@ -241,26 +303,35 @@ int main(void)
       }
 
       if(payload_zero == START_ADXL){
+        // gpio_put(GREEN_PIN, 0);
         start_adxl = true;
         start_GUN = false;
         falseStartFired = false;
+        reaction = 9999;
+        add_repeating_timer_us(INTERVAL_US, timer_callback, NULL, &timer);
         buffer_clear(&circ_buffer);
-        add_repeating_timer_ms(-1, timer_callback, NULL, &timer);
       }
       if(payload_zero == START_GUN){
         start_GUN = true;
         
         gpio_put(BUZZER_PIN, 1);
-        add_alarm_in_ms(200, turn_off_buzzer_callback, NULL, false);
+        add_alarm_in_ms(BUZZER_TIME_ON, turn_off_buzzer_callback, NULL, false);
+      }
+      if(payload_zero == TIME_SYNCH){
+        // gpio_put(BLUE_PIN, 0);
+        cancel_repeating_timer(&timer);
+        add_repeating_timer_us(INTERVAL_US, timer_callback, NULL, &timer);
+        // add_alarm_in_ms(1000, turn_off_leds_callback, NULL, false);
       }
     }
-    
+
     if(reaction < 100 && !falseStartFired){
       falseStartFired = true;
       falseStart();
     }
 
     if(send_data){
+      // gpio_put(BLUE_PIN, 0);
       send_data = false;
       my_nrf.standby_mode();
       my_nrf.tx_destination((uint8_t[]){0xC3,0xC3,0xC3,0xC3,0xC3});
@@ -272,17 +343,20 @@ int main(void)
         sprintf(msg, "%d ", (counter++));
         my_nrf.send_packet(&msg, sizeof(msg));
         // sprintf(msg, "%d\n", raw_data_together[i]);
-        sprintf(msg, "%d\n", (int16_t)filteredData[i].phaseAngle);
+        sprintf(msg, "%d\n", abs((int16_t)filteredData[i].phaseAngle));
         my_nrf.send_packet(&msg, sizeof(msg));
       }
 
-      sprintf(msg, "R%d", reaction);
+      sprintf(msg, "R%d\n", reaction);
       my_nrf.send_packet(&msg, sizeof(msg));
       
       my_nrf.receiver_mode();
 
       buffer_clear(&circ_buffer);
+      reaction = 9999;
+      // gpio_put(BLUE_PIN, 1);
     }
+
     __asm volatile ("dmb");
     tight_loop_contents();
   }

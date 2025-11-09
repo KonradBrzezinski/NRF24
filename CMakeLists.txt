@@ -53,6 +53,8 @@ target_link_libraries(NRF24
         hardware_spi
         hardware_gpio
         hardware_i2c
+        hardware_timer
+        hardware_irq
         nrf24_driver
         )
 
